@@ -9,7 +9,8 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: Configure Core RDP Settings
+
+      - name: Enable & Configure RDP
         shell: powershell
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
@@ -21,35 +22,38 @@ jobs:
 
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Secure Password
+      - name: Create RDP User
         shell: powershell
         run: |
           Add-Type -AssemblyName System.Security
-          $U = [char[]](65..90)
-          $L = [char[]](97..122)
-          $N = [char[]](48..57)
-          $S = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
+
+          $upper = [char[]](65..90)
+          $lower = [char[]](97..122)
+          $num   = [char[]](48..57)
+          $spec  = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
 
           $password = -join (
-            ($U | Get-Random -Count 4) +
-            ($L | Get-Random -Count 4) +
-            ($N | Get-Random -Count 4) +
-            ($S | Get-Random -Count 4) |
-            Sort-Object { Get-Random }
+            ($upper | Get-Random -Count 4) +
+            ($lower | Get-Random -Count 4) +
+            ($num   | Get-Random -Count 4) +
+            ($spec  | Get-Random -Count 4) |
+            Sort-Object {Get-Random}
           )
 
-          $secure = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $secure -AccountNeverExpires
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
 
-          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+          Add-Content $env:GITHUB_ENV "RDP_PASSWORD=$password"
 
       - name: Install Tailscale
         shell: powershell
         run: |
           $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $path = "$env:TEMP\tailscale.msi"
+
           Invoke-WebRequest -Uri $url -OutFile $path
           Start-Process msiexec.exe -ArgumentList "/i `"$path`" /quiet /norestart" -Wait
           Remove-Item $path -Force
@@ -57,37 +61,51 @@ jobs:
       - name: Connect Tailscale
         shell: powershell
         run: |
-          & "$env:"C:\Program Files\Tailscale\tailscale-ipn.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          $auth = "${{ secrets.TAILSCALE_AUTH_KEY }}"
+          $host = "gh-runner-" + $env:GITHUB_RUN_ID
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
 
+          # Connect Tailscale
+          & $ts up --authkey="$auth" --hostname="$host"
+
+          # Retrieve Tailscale IPv4
           $tsIP = $null
           for ($i=0; $i -lt 10 -and -not $tsIP; $i++) {
-            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+            $tsIP = & $ts ip -4
             Start-Sleep -Seconds 5
           }
 
           if (-not $tsIP) {
-            Write-Error "No Tailscale IP assigned"
+            Write-Error "Tailscale did not assign an IP"
             exit 1
           }
 
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Add-Content $env:GITHUB_ENV "TAILSCALE_IP=$tsIP"
 
-      - name: Verify RDP
+      - name: Verify RDP Port
         shell: powershell
         run: |
-          $check = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $check.TcpTestSucceeded) {
-            Write-Error "Port 3389 NOT reachable"
+          $ip = $env:TAILSCALE_IP
+          Write-Host "Checking RDP port on $ip"
+
+          $r = Test-NetConnection -ComputerName $ip -Port 3389
+          if (-not $r.TcpTestSucceeded) {
+            Write-Error "Port 3389 is NOT reachable"
             exit 1
           }
-          Write-Host "RDP port reachable!"
+
+          Write-Host "RDP Port is OPEN!"
 
       - name: Keep Alive
         shell: powershell
         run: |
-          Write-Host "===== RDP READY ====="
-          Write-Host "IP: $env:TAILSCALE_IP"
-          Write-Host "User: RDP"
-          Write-Host "Password: $env:RDP_PASSWORD"
           Write-Host "====================="
-          while ($true) { Start-Sleep -Seconds 300 }
+          Write-Host " RDP IS READY "
+          Write-Host "====================="
+          Write-Host "IP Address : $env:TAILSCALE_IP"
+          Write-Host "Username   : RDP"
+          Write-Host "Password   : $env:RDP_PASSWORD"
+          Write-Host "====================="
+          while ($true) {
+            Start-Sleep -Seconds 300
+          }
